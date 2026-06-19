@@ -1,0 +1,26 @@
+{
+  "capture": {
+    "x": 0,
+    "y": 0,
+    "width": 960,
+    "height": 1080,
+    "fps": 30,
+    "quality": "ultra",
+    "codec": "jpeg"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "dashboard_host": "127.0.0.1",
+    "dashboard_port": 8766
+  },
+  "stream": {
+    "preset": "custom",
+    "jpeg_quality_map": {
+      "low": 30,
+      "medium": 60,
+      "high": 80,
+      "ultra": 95
+    }
+  }
+}

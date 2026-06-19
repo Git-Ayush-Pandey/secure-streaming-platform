@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+dist/
+
+# Environment
+.env
+.env.local
+
+# Logs
+logs/
+*.log
+
+# Runtime Data
+backend/data/cache/
+WindowsClient/data/cache/
+
+# Keys
+server/backend/data/keys/server_private.pem
+WindowsClient/data/keys/client_private.pem
+
+# OS
+.DS_Store
+Thumbs.db

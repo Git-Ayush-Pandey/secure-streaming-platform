@@ -101,3 +101,32 @@ LOG_MAX_FILES = int(
 LOG_QUEUE_SIZE = int(
     os.getenv("LOG_QUEUE_SIZE", "10000")
 )
+
+# ── F6: /ws/auth connection-level resource limits ────────────────────────
+# Unlike HELLO messages (already rate-limited via AUTH_RATE_LIMIT_*), the
+# WebSocket *connection itself* previously had no cap and no idle timeout —
+# a client could open many sockets and never send anything, holding an
+# asyncio task + TCP socket indefinitely. These two settings bound that.
+AUTH_WS_MAX_CONNECTIONS = int(
+    os.getenv("AUTH_WS_MAX_CONNECTIONS", "100")
+)
+
+# Must comfortably exceed the client's PING keep-alive interval (10s,
+# see WindowsClient/services/auth_service.py) so legitimate pending
+# devices are never disconnected while waiting for operator approval.
+AUTH_WS_IDLE_TIMEOUT = float(
+    os.getenv("AUTH_WS_IDLE_TIMEOUT", "90")
+)
+
+# ── F6: /ws/dashboard connection-lifetime bound ───────────────────────────
+# The dashboard socket is server-push-only (client never sends anything
+# after connecting), so an idle-timeout-since-last-message check doesn't
+# apply the way it does for /ws/auth. Instead, cap the *total* lifetime of
+# a single connection so a peer that never cleanly closes (e.g. a stalled
+# browser tab, a network path that swallows the FIN) doesn't hold a slot
+# under MAX_DASHBOARD_CLIENTS indefinitely. The frontend already
+# auto-reconnects on close, so periodic forced reconnects are invisible
+# to the operator.
+DASHBOARD_WS_MAX_LIFETIME = float(
+    os.getenv("DASHBOARD_WS_MAX_LIFETIME", "3600")
+)

@@ -44,10 +44,15 @@ Live demonstration of encrypted low-latency screen streaming, showing the source
 - Graceful shutdown and single‑use session revocation.
 
 ### Security Features
-- End‑to‑end X25519 key exchange.
-- Atomic configuration writes.
-- Logging of security‑relevant events (auth failures, rate‑limit hits, session expiry).
-- Server and client private keys stored securely, excluded from repository.
+- Mutual authentication using Ed25519 identities and challenge-response verification.
+- X25519 key exchange with HKDF-derived session keys.
+- AES-GCM authenticated encryption for streaming traffic.
+- Replay protection using session validation and nonce tracking.
+- Dashboard authentication with token-based access control.
+- Rate limiting for authentication and streaming endpoints.
+- Atomic configuration writes and configuration validation.
+- Structured audit logging for security-relevant actions.
+- Server and client private keys excluded from version control.
 
 ### Streaming Features
 - UDP streaming with configurable quality presets.
@@ -55,10 +60,12 @@ Live demonstration of encrypted low-latency screen streaming, showing the source
 - Support for dynamic reconfiguration without restarting the server.
 
 ### Dashboard Features
-- Real‑time device list with pending approvals.
+- Token-protected administrative dashboard.
+- Real-time device list with pending approvals.
 - Live video preview of streamed screen content.
-- Security statistics (packet drop rate, auth rate limits, session counts).
-- Ability to approve, allow‑once, block or reject devices.
+- Security statistics (rate limits, session counts, stream health).
+- Audit visibility for security-related actions.
+- Ability to approve, allow-once, block, reject, trust, and revoke devices.
 
 ## Architecture Overview
 ```
@@ -133,11 +140,16 @@ The client will connect to the server, handle authentication, and start streamin
 - **Controls** – approve, allow‑once, block, or reject devices directly from the UI.
 
 ## Security Model
-- **Authentication** – X25519 key exchange with signed challenge.
-- **Trust Workflow** – pending devices must be approved or allowed‑once before a session is created.
-- **Approval Workflow** – dashboard actions trigger server‑side state changes and optional push of a new challenge.
-- **Encryption** – symmetric session key derived via HKDF; UDP payloads are encrypted.
-- **Session Lifecycle** – sessions expire after 30 min or on single‑use disconnect; automatic garbage collection.
+
+- **Authentication** – Ed25519 identity keys with signed challenge-response verification.
+- **Key Exchange** – Ephemeral X25519 exchange with HKDF-SHA256 session key derivation.
+- **Encryption** – AES-GCM authenticated encryption protects streaming traffic.
+- **Trust Workflow** – New devices enter a pending state and require operator approval.
+- **Dashboard Security** – Administrative endpoints require dashboard authentication and localhost access controls.
+- **Replay Protection** – Session validation and nonce tracking prevent packet reuse.
+- **Rate Limiting** – Authentication and streaming services enforce configurable resource limits.
+- **Audit Logging** – Security-sensitive actions are recorded for traceability.
+- **Session Lifecycle** – Sessions expire automatically and may be revoked by policy.
 
 ## Troubleshooting
 - **Server fails to start** – ensure no other process is using port 8765; check logs (`backend/data/logs/`).
@@ -150,6 +162,11 @@ The client will connect to the server, handle authentication, and start streamin
 - TLS termination for the FastAPI server.
 - Mobile client implementation.
 - Support for multiple simultaneous video streams.
+
+## Security Documentation
+
+Additional security details, trust assumptions, and known limitations are documented in [SECURITY.md](SECURITY.md).
+
 
 ## License
 This project is licensed under the MIT License.

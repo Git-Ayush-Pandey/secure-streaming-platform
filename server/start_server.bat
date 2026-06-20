@@ -26,7 +26,6 @@ REM First-time setup
 REM --------------------------------------------------
 if not exist ".venv" (
 
-```
 echo [INFO] First launch detected.
 echo [INFO] Creating virtual environment...
 
@@ -62,7 +61,6 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-```
 
 )
 

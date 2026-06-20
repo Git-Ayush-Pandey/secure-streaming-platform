@@ -4,14 +4,17 @@ import { getPending } from '../api/devices';
 import { useDashboardSocket } from '../hooks/useDashboardSocket';
 import { usePolling } from '../hooks/usePolling';
 import { CONFIG } from '../config';
+import { DashboardAuthError } from '../api/api';
+import { getDashboardToken } from '../api/dashboardToken';
 
 const AppContext = createContext(null);
 
 const initialState = {
-  serverInfo:       null,
-  serverError:      false,
-  pendingRequests:  [],   // list of pending device objects (include expires_in)
-  notifications:    [],   // toast-style notifications
+  serverInfo: null,
+  serverError: false,
+  needsAuth: !getDashboardToken(), // F1: no token stored yet
+  pendingRequests: [],   // list of pending device objects (include expires_in)
+  notifications: [],   // toast-style notifications
 };
 
 function reducer(state, action) {
@@ -21,6 +24,12 @@ function reducer(state, action) {
 
     case 'SET_SERVER_ERROR':
       return { ...state, serverError: true };
+
+    case 'SET_NEEDS_AUTH':
+      return { ...state, needsAuth: true };
+
+    case 'CLEAR_NEEDS_AUTH':
+      return { ...state, needsAuth: false, serverError: false };
 
     case 'SET_PENDING': {
       // Filter out already-expired challenges from the polled list
@@ -82,8 +91,13 @@ export function AppProvider({ children }) {
     try {
       const info = await getServerInfo();
       dispatch({ type: 'SET_SERVER_INFO', payload: info });
-    } catch (_) {
-      dispatch({ type: 'SET_SERVER_ERROR' });
+      dispatch({ type: 'CLEAR_NEEDS_AUTH' });
+    } catch (err) {
+      if (err instanceof DashboardAuthError) {
+        dispatch({ type: 'SET_NEEDS_AUTH' });
+      } else {
+        dispatch({ type: 'SET_SERVER_ERROR' });
+      }
     }
   }, []);
 
@@ -92,7 +106,7 @@ export function AppProvider({ children }) {
     try {
       const { devices } = await getPending();
       dispatch({ type: 'SET_PENDING', payload: devices });
-    } catch (_) {}
+    } catch (_) { }
   }, []);
 
   usePolling(fetchServerInfo, CONFIG.LOG_REFRESH_INTERVAL);
@@ -115,16 +129,20 @@ export function AppProvider({ children }) {
       dispatch({
         type: 'ADD_NOTIFICATION',
         payload: {
-          id:      Date.now(),
-          type:    'pending',
+          id: Date.now(),
+          type: 'pending',
           message: `New device requesting access: ${data.device_name || data.device_id}`,
-          data:    payload,
+          data: payload,
         },
       });
     }
   }, []);
 
-  useDashboardSocket(handleWsEvent);
+  const handleWsAuthError = useCallback(() => {
+    dispatch({ type: 'SET_NEEDS_AUTH' });
+  }, []);
+
+  useDashboardSocket(handleWsEvent, handleWsAuthError);
 
   // ── Helpers exposed to consumers ──────────────────────────────────────────
   const removePending = useCallback((fp) => {

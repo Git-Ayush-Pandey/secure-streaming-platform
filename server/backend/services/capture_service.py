@@ -259,22 +259,6 @@ class ScreenCaptureService:
             raise RuntimeError("cv2.imencode failed")
         return buf.tobytes()
 
-        for packet in codec.encode(frame):
-            buf += bytes(packet)
-            if packet.is_keyframe:
-                is_keyframe = True
-
-        if needs_rebuild and not buf:
-            # Defensive: ultrafast/zerolatency should emit a packet per input
-            # frame, but if encoder latency ever buffers the first frame,
-            # treat an empty first encode as "not yet a usable frame" rather
-            # than sending a zero-byte UDP payload.
-            return b"", False
-
-        return buf, is_keyframe
-
-
-
     # ── Demo / fallback loop ───────────────────────────────────────────────────
 
     async def _demo_loop(self, interval: float) -> None:

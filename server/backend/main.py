@@ -42,11 +42,21 @@ from .services.capture_service import capture_service
 from .services.stream_service import stream_service
 from .services import device_registry as reg
 from .services.logger import log_event, get_recent_logs, flush as log_flush
+from .services.dashboard_auth import (
+    ensure_dashboard_token,
+    get_dashboard_token,
+    require_dashboard_auth,
+    dashboard_ws_token_valid,
+    actor_id_from_request,
+)
 from .settings import (
     DEBUG,
     CORS_ORIGINS,
     MAX_DASHBOARD_CLIENTS,
     UDP_HOST,
+    AUTH_WS_MAX_CONNECTIONS,
+    AUTH_WS_IDLE_TIMEOUT,
+    DASHBOARD_WS_MAX_LIFETIME,
 )
 # ── Server identity (generated once, persisted) ───────────────────────────────
 _server_private, _server_public = None, None
@@ -56,6 +66,9 @@ _server_public_key_b64: str = ""
 
 # ── Dashboard WebSocket connections ───────────────────────────────────────────
 _dashboard_sockets: list[WebSocket] = []
+
+# ── F6: /ws/auth connection-level resource bound ──────────────────────────────
+_auth_ws_count: int = 0
 
 # ── Configure-stream lock (FINDING-17) ───────────────────────────────────────
 # FIX: asyncio.Lock() must be created inside a running event loop on Python
@@ -121,6 +134,18 @@ async def lifespan(app: FastAPI):
     cap        = server_cfg["capture"]
     udp_port   = server_cfg["server"].get("port", 8765)
 # codec = cap.get("codec", "h264")  # No longer needed
+
+    # F1: generate/load the dashboard bearer token and print a ready-to-use
+    # bootstrap URL, the same way Jupyter prints a token URL on startup.
+    # Pasting this URL into the dashboard once stores the token in the
+    # browser (localStorage); subsequent visits don't need it again.
+    dash_token = ensure_dashboard_token()
+    dash_host  = server_cfg["server"].get("dashboard_host", "127.0.0.1")
+    dash_port  = server_cfg["server"].get("dashboard_port", 5173)
+    bootstrap_url = f"http://{dash_host}:{dash_port}/?token={dash_token}"
+    print(f"\n=== Dashboard access ===\n{bootstrap_url}\n"
+          f"(Token also stored at data/config/.dashboard_token)\n", flush=True)
+    log_event("DASHBOARD_TOKEN_READY", {"dashboard_host": dash_host, "dashboard_port": dash_port})
 
     capture_service.configure(
         x=cap["x"], y=cap["y"],
@@ -210,13 +235,16 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 # ── Localhost guard ────────────────────────────────────────────────────────────
 
 def _localhost_only(request: Request) -> None:
-    # FINDING-08: "localhost" string removed — uvicorn always gives resolved IP
-    host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1"):
-        raise HTTPException(
-            status_code=403,
-            detail="Dashboard API is accessible from localhost only",
-        )
+    """
+    Guard used on every admin/dashboard HTTP route.
+
+    F1/F2 hardening: this now also requires a valid bearer/query dashboard
+    token and, for state-changing methods, a recognised Origin (when one is
+    sent). The function name and signature are kept unchanged so every
+    existing call site below continues to work without modification.
+    See services/dashboard_auth.py for the implementation and rationale.
+    """
+    require_dashboard_auth(request)
 
 
 # ── Dashboard WebSocket (localhost only) ───────────────────────────────────────
@@ -227,6 +255,13 @@ async def dashboard_ws(ws: WebSocket) -> None:
     if host not in ("127.0.0.1", "::1"):
         await ws.close(code=4003)
         return
+    # F1: same bearer token required as the REST admin API. Browsers can't
+    # set custom headers on a WebSocket upgrade, so the token travels as a
+    # query parameter here (the frontend appends it automatically).
+    if not dashboard_ws_token_valid(ws):
+        log_event("DASHBOARD_WS_AUTH_FAILED", {"host": host})
+        await ws.close(code=4401)
+        return
     if len(_dashboard_sockets) >= MAX_DASHBOARD_CLIENTS:
         log_event("DASHBOARD_WS_LIMIT", {
             "host": host, "current": len(_dashboard_sockets),
@@ -236,9 +271,20 @@ async def dashboard_ws(ws: WebSocket) -> None:
         return
     await ws.accept()
     _dashboard_sockets.append(ws)
+    connected_at = time.monotonic()
     try:
         while True:
-            await asyncio.sleep(15)
+            # F6: bound total connection lifetime — see DASHBOARD_WS_MAX_LIFETIME
+            # in settings.py for rationale (no idle-since-last-message signal
+            # exists on this server-push-only socket, so lifetime is the bound).
+            remaining = DASHBOARD_WS_MAX_LIFETIME - (time.monotonic() - connected_at)
+            if remaining <= 0:
+                log_event("DASHBOARD_WS_LIFETIME_EXCEEDED", {
+                    "host": host, "max_lifetime": DASHBOARD_WS_MAX_LIFETIME,
+                })
+                await ws.close(code=4000)
+                break
+            await asyncio.sleep(min(15, remaining))
             await ws.send_json({"event": "ping"})
     except (WebSocketDisconnect, Exception):
         pass
@@ -251,14 +297,39 @@ async def dashboard_ws(ws: WebSocket) -> None:
 
 @app.websocket("/ws/auth")
 async def auth_ws(ws: WebSocket) -> None:
-    await ws.accept()
+    global _auth_ws_count
+
     ip = ws.client.host if ws.client else "unknown"
+
+    # F6: bound total concurrent /ws/auth connections. Checked BEFORE
+    # accept() so a flood of connection attempts can't accumulate accepted
+    # sockets/tasks beyond this cap. Legitimate per-IP HELLO traffic is
+    # already separately rate-limited below this layer.
+    if _auth_ws_count >= AUTH_WS_MAX_CONNECTIONS:
+        log_event("AUTH_WS_CONNECTION_LIMIT", {
+            "ip": ip, "current": _auth_ws_count, "max": AUTH_WS_MAX_CONNECTIONS,
+        })
+        await ws.close(code=4008)
+        return
+
+    await ws.accept()
+    _auth_ws_count += 1
     authed_fingerprint: Optional[str] = None
     pending_fingerprint: Optional[str] = None
 
     try:
         while True:
-            raw = await ws.receive_text()
+            # F6: idle timeout — a socket that never sends HELLO/PING/anything
+            # is closed rather than held open indefinitely. The default
+            # (90s) comfortably exceeds the client's 10s PING keep-alive
+            # interval used while awaiting operator approval, so legitimate
+            # devices are never affected.
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=AUTH_WS_IDLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                log_event("AUTH_WS_IDLE_TIMEOUT", {"ip": ip, "timeout": AUTH_WS_IDLE_TIMEOUT})
+                await ws.close(code=4408)
+                break
 
             # FINDING-13: parse errors → send error, continue (don't crash loop)
             try:
@@ -349,6 +420,8 @@ async def auth_ws(ws: WebSocket) -> None:
         })
 
     finally:
+        # F6: release the connection-count slot
+        _auth_ws_count -= 1
         # FINDING-04: revoke single-use session on any disconnect
         if authed_fingerprint:
             auth_service.on_auth_ws_disconnect(authed_fingerprint)
@@ -415,7 +488,7 @@ async def configure_stream(request: Request) -> dict:
         await capture_service.start()
         stream_service.capture_started()
 
-    log_event("STREAM_CONFIGURED", {"config": cap})
+    log_event("STREAM_CONFIGURED", {"config": cap, "actor": actor_id_from_request(request)})
     return {"status": "ok", "config": cap}
 
 
@@ -424,7 +497,7 @@ async def start_stream(request: Request) -> dict:
     _localhost_only(request)
     await capture_service.start()
     stream_service.capture_started()
-    log_event("STREAM_STARTED", {})
+    log_event("STREAM_STARTED", {"actor": actor_id_from_request(request)})
     return {"status": "started"}
 
 
@@ -433,7 +506,7 @@ async def stop_stream(request: Request) -> dict:
     _localhost_only(request)
     stream_service.capture_stopped()
     await capture_service.stop()
-    log_event("STREAM_STOPPED", {})
+    log_event("STREAM_STOPPED", {"actor": actor_id_from_request(request)})
     return {"status": "stopped"}
 
 
@@ -458,6 +531,10 @@ async def get_pending(request: Request) -> dict:
 async def approve_device(fp: str, request: Request) -> dict:
     _localhost_only(request)
     ok = await auth_service.approve_permanently(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "approve_pending", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok" if ok else "not_found",
+    })
     return {"status": "ok" if ok else "not_found"}
 
 
@@ -465,6 +542,10 @@ async def approve_device(fp: str, request: Request) -> dict:
 async def allow_once_device(fp: str, request: Request) -> dict:
     _localhost_only(request)
     ok = await auth_service.allow_once(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "allow_once", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok" if ok else "not_found",
+    })
     if not ok:
         return {"status": "not_found"}
     # Build challenge response similar to auth_service's _issue_challenge
@@ -500,6 +581,10 @@ async def allow_once_device(fp: str, request: Request) -> dict:
 async def reject_device(fp: str, request: Request) -> dict:
     _localhost_only(request)
     ok = await auth_service.reject(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "reject_pending", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok" if ok else "not_found",
+    })
     return {"status": "ok" if ok else "not_found"}
 
 
@@ -507,6 +592,10 @@ async def reject_device(fp: str, request: Request) -> dict:
 async def block_pending_device(fp: str, request: Request) -> dict:
     _localhost_only(request)
     ok = await auth_service.block_permanently(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "block_pending", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok" if ok else "not_found",
+    })
     return {"status": "ok" if ok else "not_found"}
 @app.post("/api/devices/{fp}/disconnect")
 async def remove_device(fp: str, request: Request) -> dict:
@@ -515,6 +604,10 @@ async def remove_device(fp: str, request: Request) -> dict:
     removed = stream_service.remove_client(fp)
     # Ensure auth session removed (stream_service already does, but safe)
     auth_service.remove_session(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "disconnect_device", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok" if removed else "not_found",
+    })
     await _push_dashboard('device_removed', {'fingerprint': fp})
     return {"status": "ok" if removed else "not_found"}
 
@@ -533,6 +626,10 @@ async def remove_trust(fp: str, request: Request) -> dict:
     # Also revoke any live session so the device can't keep streaming
     auth_service.remove_session(fp)
     reg.remove_trusted(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "remove_trust", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok",
+    })
     return {"status": "ok"}
 
 
@@ -540,6 +637,10 @@ async def remove_trust(fp: str, request: Request) -> dict:
 async def block_trusted(fp: str, request: Request) -> dict:
     _localhost_only(request)
     await auth_service.block_permanently(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "block_trusted", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok",
+    })
     return {"status": "ok"}
 
 
@@ -555,6 +656,10 @@ async def get_blocked(request: Request, limit: int = 10, offset: int = 0) -> dic
 async def unblock_device(fp: str, request: Request) -> dict:
     _localhost_only(request)
     reg.remove_blocked(fp)
+    log_event("DASHBOARD_ACTION", {
+        "action": "unblock_device", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok",
+    })
     return {"status": "ok"}
 
 
@@ -565,6 +670,10 @@ async def trust_blocked(fp: str, request: Request) -> dict:
     if blocked:
         reg.remove_blocked(fp)
         reg.save_trusted({**blocked, "fingerprint": fp})
+    log_event("DASHBOARD_ACTION", {
+        "action": "trust_blocked", "fingerprint": fp,
+        "actor": actor_id_from_request(request), "result": "ok" if blocked else "not_found",
+    })
     return {"status": "ok"}
 
 

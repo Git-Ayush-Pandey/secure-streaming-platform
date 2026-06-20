@@ -44,12 +44,12 @@ Frame Wire Format (server → client) — CHANGED (breaking, see migration note)
     [ciphertext_fragment]   ← raw slice of the single whole-frame AES-GCM
                               ciphertext; the 16B GCM tag is appended only
                               to the LAST fragment (frag_index == frag_count-1)
-  MIGRATION IMPACT: any previously-written client decoder must be updated —
-  it must buffer fragments by (frame_seq, frag_index) until frag_count
-  fragments have arrived, concatenate ciphertext in index order, then run
-  AES-256-GCM decrypt(nonce, full_ciphertext, aad=frame_seq_bytes) once over
-  the reassembled buffer. No client implementation exists in this repository
-  to update; this is documented here for whoever implements the device side.
+  MIGRATION IMPACT: any client decoder must buffer fragments by
+  (frame_seq, frag_index) until frag_count fragments have arrived,
+  concatenate ciphertext in index order, then run AES-256-GCM
+  decrypt(nonce, full_ciphertext, aad=frame_seq_bytes) once over the
+  reassembled buffer. WindowsClient/services/frame_reassembler.py
+  implements exactly this and matches the wire format below.
 """
 from __future__ import annotations
 

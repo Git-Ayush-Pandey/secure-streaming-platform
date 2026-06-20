@@ -19,9 +19,25 @@ logs/
 backend/data/cache/
 WindowsClient/data/cache/
 
-# Keys
+# Dashboard auth token (F1) — generated per-install, must never be committed
+server/backend/data/config/.dashboard_token
+
+# Keys and key-protection secrets (F3, F4)
+# Private keys were already excluded; .key_passphrase (the secret that
+# encrypts the Ed25519 private key at rest) was missing from the original
+# list and ended up committed in the initial release — see hardening notes.
 server/backend/data/keys/server_private.pem
+server/backend/data/keys/.key_passphrase
 WindowsClient/data/keys/client_private.pem
+WindowsClient/data/keys/.key_passphrase
+
+# Device registry / trust state — local install data, not source
+server/backend/data/trusted_clients/
+server/backend/data/blocked_clients/
+server/backend/data/recent_clients/
+server/backend/data/rejected_clients/
+server/backend/data/config/server_config.json
+WindowsClient/data/trusted_servers/
 
 # OS
 .DS_Store

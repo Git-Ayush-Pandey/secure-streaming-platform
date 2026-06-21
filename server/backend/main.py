@@ -91,6 +91,8 @@ async def _push_dashboard(event: str, data: dict) -> None:
 
 
 def _on_pending(req) -> None:
+    print(f"[DEBUG-LAN] PENDING APPROVAL: device_id={req.device_id} "
+          f"fingerprint={req.fingerprint[:20]}... ip={req.ip}", flush=True)
     asyncio.create_task(_push_dashboard("pending_request", {
         "device_id":   req.device_id,
         "device_name": req.device_name,
@@ -152,15 +154,19 @@ async def lifespan(app: FastAPI):
         width=cap["width"], height=cap["height"],
         fps=cap["fps"],
     )
+    print("[DEBUG-LAN] FRAME CAPTURE TASK STARTING...", flush=True)
     await capture_service.start()
+    print(f"[DEBUG-LAN] FRAME CAPTURE TASK STARTED: running={capture_service.is_running}", flush=True)
     stream_service.capture_started()
 
     # FINDING-06: start() now raises on bind failure
     try:
+        print(f"[DEBUG-LAN] UDP STREAM SENDER STARTING on {UDP_HOST}:{udp_port}...", flush=True)
         await stream_service.start(
             host=UDP_HOST,
             port=udp_port
         )
+        print(f"[DEBUG-LAN] UDP STREAM SENDER STARTED: running={stream_service._running}", flush=True)
     except RuntimeError as exc:
         log_event("UDP_STARTUP_FATAL", {"error": str(exc)})
         # Still allow the app to serve the dashboard even if UDP failed
@@ -198,6 +204,66 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── LAN-facing surface filter ───────────────────────────────────────────────────
+# Remote-streaming architecture: the dashboard/admin surface (everything in
+# this file except /ws/auth) must stay loopback-only even when the server
+# machine also exposes /ws/auth to LAN clients on a second listener (see
+# run.py — two uvicorn.Server instances share this one `app` object).
+#
+# `_localhost_only()` on each admin route is already sufficient on its own
+# (it checks the real source IP of every request, regardless of which
+# socket accepted it). This wrapper is an additional, structural layer:
+# requests that arrive on the LAN-bound listener are rejected here, by
+# path, BEFORE Starlette's router or any route function runs at all. That
+# way a future route that forgets to call _localhost_only() still can't be
+# reached from the LAN — the listener itself won't dispatch to it.
+#
+# Only /ws/auth (the authentication/session-establishment entrypoint) and
+# /health (no sensitive data; useful for LAN-side reachability checks) are
+# allowed through. Everything else — dashboard, every /api/* admin route,
+# /ws/dashboard, and DEBUG-only /docs /redoc /openapi.json — is closed at
+# this layer regardless of DEBUG or any other setting.
+_LAN_ALLOWED_PATHS = frozenset({"/ws/auth", "/health"})
+
+
+class LANSurfaceFilter:
+    """
+    ASGI wrapper applied ONLY to the LAN-facing uvicorn.Server's view of the
+    app (see run.py). The loopback dashboard listener uses the plain `app`
+    object directly and is unaffected by this filter.
+    """
+
+    def __init__(self, inner_app) -> None:
+        self._app = inner_app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            path = scope.get("path", "")
+            if path not in _LAN_ALLOWED_PATHS:
+                if scope["type"] == "websocket":
+                    # Close before accept — never upgrades the connection.
+                    await send({"type": "websocket.close", "code": 4003})
+                else:
+                    await send({
+                        "type": "http.response.start",
+                        "status": 403,
+                        "headers": [(b"content-type", b"application/json")],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"detail":"Not available on this listener"}',
+                    })
+                return
+        await self._app(scope, receive, send)
+
+
+# Built once at import time; run.py imports this alongside `app` to
+# construct the LAN-facing uvicorn.Config. Importing main.py for the
+# loopback-only server (current single-listener behavior, e.g. tests or a
+# minimal deployment) is unaffected — `app` itself is unchanged.
+lan_app = LANSurfaceFilter(app)
 
 
 # ── Global unhandled-exception handler ──────────────────────────────────────────
@@ -383,6 +449,7 @@ async def auth_ws(ws: WebSocket) -> None:
                         msg["fingerprint"], msg["signature_b64"]
                     )
                     result["udp_port"] = stream_service.udp_port
+                    result["server_time_ms"] = int(time.time() * 1000)
                     if result.get("status") == "authenticated":
                         authed_fingerprint = msg["fingerprint"]
                         pending_fingerprint = None

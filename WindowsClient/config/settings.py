@@ -5,7 +5,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 SERVER_IP = os.getenv("SERVER_IP", "127.0.0.1")
-AUTH_PORT = int(os.getenv("AUTH_PORT", "8766"))
+# Default matches the server's AUTH_BIND_PORT default (backend/.env /
+# backend/settings.py) — the auth/streaming listener, separate from the
+# server's dashboard port (8766). See WindowsClient/.env for details.
+AUTH_PORT = int(os.getenv("AUTH_PORT", "8767"))
 UDP_PORT = int(os.getenv("UDP_PORT", "8765"))
 
 DEVICE_ID = os.getenv("DEVICE_ID", "vm-client")

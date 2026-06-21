@@ -82,13 +82,26 @@ class PendingRequest:
 
 
 class _Session:
-    __slots__ = ("key", "expires_at", "device_name", "ip", "single_use", "auth_ws", "used_nonces")
+    __slots__ = ("key", "expires_at", "device_name", "ip", "udp_ip", "single_use", "auth_ws", "used_nonces")
 
     def __init__(self, key, device_name, ip, single_use: bool = False, auth_ws=None):
         self.key         = key
         self.expires_at  = time.time() + SESSION_TTL
         self.device_name = device_name
         self.ip          = ip
+        # LAN FIX: IP of the first authenticated UDP heartbeat for this
+        # session, tracked SEPARATELY from `ip` (the TCP /ws/auth source).
+        # On a real two-machine LAN, the OS can legitimately pick a
+        # different source interface/IP for an unconnected UDP socket
+        # than it did for the TCP connection (multiple NICs, VPN/virtual
+        # adapters, Wi-Fi+Ethernet both up, Hyper-V/WSL/Docker virtual
+        # switches — all common on Windows). Pinning anti-hijack
+        # protection to the TCP IP rejects every legitimate heartbeat on
+        # such machines. We pin to the first valid (HMAC-verified) UDP
+        # heartbeat's IP instead and require subsequent heartbeats to
+        # match THAT — still blocking hijacking, since an attacker
+        # without the session key cannot produce a valid HMAC at all.
+        self.udp_ip      = None
         self.single_use  = single_use
         self.auth_ws     = auth_ws   # FINDING-04
         self.used_nonces = deque(maxlen=256)
@@ -222,6 +235,8 @@ class AuthService:
                      public_key_b64: str, ip: str,
                      client_x25519_pub_b64: Optional[str] = None,
                      auth_ws=None) -> dict:
+        print(f"[DEBUG-LAN] AUTH RECEIVED: device_id={device_id} ip={ip} "
+              f"has_x25519={bool(client_x25519_pub_b64)}", flush=True)
         if not self._limiter.allow(ip):
             log_event("RATE_LIMIT_EXCEEDED", {"ip": ip, "device_id": device_id})
             return {"status": "rate_limited", "challenge_b64": None, "session_key_b64": None}
@@ -330,6 +345,8 @@ class AuthService:
                 ).decode()
                 response["server_fingerprint"] = self._server_fp
 
+        print(f"[DEBUG-LAN] CHALLENGE SENT: fingerprint={fp[:20]}... ip={ip} "
+              f"has_x25519_response={'server_x25519_public_b64' in response}", flush=True)
         return response
 
     # ── CHALLENGE_RESPONSE ─────────────────────────────────────────────────────
@@ -398,6 +415,10 @@ class AuthService:
             auth_ws=req.auth_ws,
         )
 
+        print(f"[DEBUG-LAN] CHALLENGE VERIFIED: fingerprint={fingerprint[:20]}... ip={req.ip}", flush=True)
+        print(f"[DEBUG-LAN] SESSION CREATED: fingerprint={fingerprint[:20]}... "
+              f"session.ip={req.ip} single_use={req.allow_once}", flush=True)
+
         reg.update_trusted_stats(fingerprint, req.ip)
         reg.save_recent(req.device_id, fingerprint, req.ip,
                         "connected", req.device_name)
@@ -432,6 +453,7 @@ class AuthService:
         log_event("CLIENT_TRUSTED", {
             "fingerprint": fingerprint, "device_name": req.device_name,
         })
+        print(f"[DEBUG-LAN] APPROVAL RECEIVED (permanent): fingerprint={fingerprint[:20]}... ip={req.ip}", flush=True)
         # FINDING-03: push challenge to the waiting client
         await self._push_challenge_to_client(fingerprint)
         return True
@@ -442,6 +464,7 @@ class AuthService:
             return False
         req.allow_once = True
         log_event("ALLOW_ONCE", {"fingerprint": fingerprint, "ip": req.ip})
+        print(f"[DEBUG-LAN] APPROVAL RECEIVED (allow_once): fingerprint={fingerprint[:20]}... ip={req.ip}", flush=True)
         # FINDING-03: push challenge to the waiting client
         await self._push_challenge_to_client(fingerprint)
         return True

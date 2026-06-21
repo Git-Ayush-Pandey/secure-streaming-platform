@@ -3,6 +3,7 @@ import base64
 import hashlib
 import logging
 import asyncio
+import time
 import websockets
 from cryptography.hazmat.primitives import serialization
 from storage.key_store import load_or_create_keys, public_key_b64
@@ -188,6 +189,15 @@ class AuthService:
                 
             logger.info("Successfully authenticated with server!")
             self._notify("CONNECTED", "Authentication complete")
+            
+            # Calculate clock offset with server to compensate for LAN clock skew
+            server_time_ms = auth_reply.get("server_time_ms")
+            if server_time_ms is not None:
+                client_time_ms = int(time.time() * 1000)
+                self.clock_offset_ms = server_time_ms - client_time_ms
+                logger.info(f"Calculated clock offset with server: {self.clock_offset_ms} ms")
+            else:
+                self.clock_offset_ms = 0
             
             # Derive shared AES key
             shared = x25519_exchange(x_priv, srv_x_pub_bytes)

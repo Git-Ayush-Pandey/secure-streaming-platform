@@ -12,6 +12,27 @@ SERVER_PORT = int(os.getenv("SERVER_PORT", "8766"))
 UDP_HOST = os.getenv("UDP_HOST", "0.0.0.0")
 UDP_PORT = int(os.getenv("UDP_PORT", "8765"))
 
+# ── LAN streaming: dual-listener split ──────────────────────────────────────
+# SERVER_HOST/SERVER_PORT (above) is the dashboard/admin listener and MUST
+# stay loopback — enforced separately in run.py regardless of this value.
+#
+# AUTH_BIND_HOST/AUTH_BIND_PORT is a SECOND uvicorn listener serving only
+# /ws/auth (+ /health) — see LANSurfaceFilter in main.py and run.py. This
+# is what makes the Windows client's ws://{SERVER_IP}:{AUTH_PORT}/ws/auth
+# reachable from another machine on the LAN without exposing the dashboard
+# or any admin API.
+#
+# IMPORTANT: this MUST be a different port number than SERVER_PORT. A
+# socket bound to 0.0.0.0:N and one bound to 127.0.0.1:N cannot coexist —
+# 0.0.0.0 is a wildcard that already covers 127.0.0.1 at that port, so the
+# second bind fails with "Address already in use". Defaults to
+# SERVER_PORT + 1 (8767 given the project's default 8766) for that reason.
+#
+# Set WindowsClient/.env's AUTH_PORT to match this value when the client
+# is on a different machine than the server (see migration notes).
+AUTH_BIND_HOST = os.getenv("AUTH_BIND_HOST", "0.0.0.0")
+AUTH_BIND_PORT = int(os.getenv("AUTH_BIND_PORT", str(SERVER_PORT + 1)))
+
 CORS_ORIGINS = [
     x.strip()
     for x in os.getenv("CORS_ORIGINS", "").split(",")

@@ -4,11 +4,11 @@ import struct
 import hmac
 import hashlib
 import logging
-import socket
+import asyncio
 
 logger = logging.getLogger("Heartbeat")
 
-def create_heartbeat_packet(fingerprint: str, session_key: bytes) -> bytes:
+def create_heartbeat_packet(fingerprint: str, session_key: bytes, clock_offset_ms: int = 0) -> bytes:
     """
     UDP Heartbeat Wire Format:
       [2B fp_len][fp_bytes][8B unix_timestamp_ms][16B nonce][32B HMAC-SHA256]
@@ -18,7 +18,7 @@ def create_heartbeat_packet(fingerprint: str, session_key: bytes) -> bytes:
     fp_bytes = fingerprint.encode("utf-8")
     fp_len = len(fp_bytes)
     
-    ts_ms = int(time.time() * 1000)
+    ts_ms = int(time.time() * 1000) + clock_offset_ms
     ts_bytes = struct.pack(">Q", ts_ms)
     
     nonce = os.urandom(16)
@@ -29,11 +29,11 @@ def create_heartbeat_packet(fingerprint: str, session_key: bytes) -> bytes:
     packet = struct.pack(">H", fp_len) + fp_bytes + ts_bytes + nonce + tag
     return packet
 
-def send_heartbeat(sock: socket.socket, server_ip: str, server_port: int, 
-                   fingerprint: str, session_key: bytes) -> None:
+def send_heartbeat(transport: asyncio.DatagramTransport, server_ip: str, server_port: int, 
+                   fingerprint: str, session_key: bytes, clock_offset_ms: int = 0) -> None:
     try:
-        packet = create_heartbeat_packet(fingerprint, session_key)
-        sock.sendto(packet, (server_ip, server_port))
+        packet = create_heartbeat_packet(fingerprint, session_key, clock_offset_ms)
+        transport.sendto(packet, (server_ip, server_port))
         logger.debug(f"Heartbeat sent to {server_ip}:{server_port}")
     except Exception as e:
         logger.error(f"Failed to send heartbeat: {e}")

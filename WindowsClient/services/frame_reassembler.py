@@ -104,5 +104,15 @@ class FrameReassembler:
             if now - v["timestamp"] > 1.5
         ]
         for k in stale_keys:
+            v = self.buffers[k]
+            received = len(v["fragments"])
+            total = v["frag_count"]
+            # DIAGNOSTIC (video pipeline audit): this is the direct, in-band
+            # evidence of incomplete-frame loss. If this fires continuously
+            # with received << total, the frame size / fragment count is too
+            # high for the network path to deliver before frames go stale.
+            logger.warning(
+                f"Discarded incomplete frame {k}: received {received}/{total} "
+                f"fragments ({received/total:.0%}) before 1.5s timeout"
+            )
             self.buffers.pop(k, None)
-            logger.debug(f"Discarded stalled frame buffer {k}")

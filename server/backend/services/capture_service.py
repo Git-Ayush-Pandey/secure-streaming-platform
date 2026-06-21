@@ -87,7 +87,13 @@ class ScreenCaptureService:
 
         self._region       = {"left": x, "top": y, "width": width, "height": height}
         self._fps          = max(1, min(fps, 60))
-        self._jpeg_quality = 100
+        # FIX (video pipeline audit): quality=100 produced ~676KB ciphertext
+        # per 1280x720 frame -> 485 UDP fragments/frame -> ~9,700 pkt/s, with
+        # FrameReassembler requiring 100% fragment delivery within 1.5s.
+        # Real LAN loss made full-frame reassembly statistically near-zero.
+        # quality=80 is visually close to lossless but cuts payload by
+        # roughly 5-10x, bringing fragment counts down to a tolerable range.
+        self._jpeg_quality = 80
         # Use JPEG only (no H.264)
         self._codec = "jpeg"
 

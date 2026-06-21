@@ -30,7 +30,11 @@ class ConnectionManager:
         self.server_udp_port: int = 8765
         
         self.udp_transport: Optional[asyncio.DatagramTransport] = None
-        self.packet_queue = asyncio.Queue(maxsize=1000)
+        # FIX (video pipeline audit): 1000 was undersized for high fragment-
+        # count frames (could be ~9,700 pkt/s at quality=100/720p/20fps).
+        # Bumped headroom; real fix is reducing fragment count via Patch A,
+        # this just adds slack for jitter/bursts.
+        self.packet_queue = asyncio.Queue(maxsize=4000)
         self.frame_reassembler = FrameReassembler()
         self.decoder = VideoDecoder()
         
@@ -84,21 +88,16 @@ class ConnectionManager:
                 self.frame_reassembler = FrameReassembler() # Reset reassembler sequence counters
                 
                 # 2. Setup shared UDP receiver socket and start receiver protocol
-                # Bind to port 0 for dynamic client ephemeral port assignment
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.bind(("0.0.0.0", 0))
-                sock.setblocking(False)
-                client_port = sock.getsockname()[1]
+                self.udp_transport = await start_udp_receiver(0, self.packet_queue)
+                client_port = self.udp_transport.get_extra_info('sockname')[1]
                 logger.info(f"UDP socket bound to client ephemeral port: {client_port}")
-                
-                self.udp_transport = await start_udp_receiver(0, self.packet_queue, sock=sock)
                 
                 self.state_machine.transition_to(StateMachine.CONNECTED, f"Stream connected via server UDP port {self.server_udp_port}")
                 self.retry_policy.reset()
                 self.last_frame_time = time.time()
                 
                 # 3. Launch heartbeat loop, packet processing, and connection timeout guard tasks
-                hb_task = asyncio.create_task(self._heartbeat_loop(sock))
+                hb_task = asyncio.create_task(self._heartbeat_loop())
                 rx_task = asyncio.create_task(self._packet_process_loop())
                 timeout_task = asyncio.create_task(self._timeout_guard_loop())
                 
@@ -163,22 +162,27 @@ class ConnectionManager:
                 
         self.session_key = None
 
-    async def _heartbeat_loop(self, sock: socket.socket):
+    async def _heartbeat_loop(self):
         """Send authenticated UDP heartbeats to the server every 5 seconds."""
         while self.state_machine.state == StateMachine.CONNECTED:
-            send_heartbeat(
-                sock=sock,
-                server_ip=SERVER_IP,
-                server_port=self.server_udp_port,
-                fingerprint=self.auth_service.fingerprint,
-                session_key=self.session_key
-            )
+            if self.udp_transport:
+                send_heartbeat(
+                    transport=self.udp_transport,
+                    server_ip=SERVER_IP,
+                    server_port=self.server_udp_port,
+                    fingerprint=self.auth_service.fingerprint,
+                    session_key=self.session_key,
+                    clock_offset_ms=getattr(self.auth_service, "clock_offset_ms", 0)
+                )
             await asyncio.sleep(5)
 
     async def _packet_process_loop(self):
         """Dequeue UDP packets, reassemble slices, decrypt, and decode frame bytes."""
         while self.state_machine.state == StateMachine.CONNECTED:
             data, addr = await self.packet_queue.get()
+            
+            # Update last activity timestamp on any packet receipt to keep timeout guard alive
+            self.last_frame_time = time.time()
             
             # process packet
             res = self.frame_reassembler.process_packet(data, self.session_key)

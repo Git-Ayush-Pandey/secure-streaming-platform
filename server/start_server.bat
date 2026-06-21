@@ -84,7 +84,7 @@ REM Start Backend
 REM --------------------------------------------------
 echo [INFO] Starting backend...
 
-start "Drone Backend" cmd /k "cd /d ""%~dp0"" && call .venv\Scripts\activate.bat && python run.py --reload"
+start "Drone Backend" cmd /k "cd /d ""%~dp0"" && call .venv\Scripts\activate.bat && python run.py"
 
 timeout /t 5 /nobreak >nul
 

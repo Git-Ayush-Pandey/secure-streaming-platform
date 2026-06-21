@@ -169,6 +169,11 @@ class UDPStreamService:
         self._broadcast_task = None
         self._cleanup_task = None
 
+        # TEMPORARY: LAN debug instrumentation — remove after diagnosing
+        # the separate-machine connection flow.
+        self._debug_lan_first_packet_seen = False
+        self._debug_lan_first_frame_fragmented = False
+
     # ── Capture state signals (called from main.py) ────────────────────────────
 
     def capture_started(self) -> None:
@@ -240,9 +245,14 @@ class UDPStreamService:
     def _on_heartbeat(self, data: bytes, addr: tuple) -> None:
         ip, port = addr
 
+        if not self._debug_lan_first_packet_seen:
+            self._debug_lan_first_packet_seen = True
+            print(f"[DEBUG-LAN] FIRST UDP PACKET RECEIVED: from={ip}:{port} len={len(data)}", flush=True)
+
         # ── DoS: per-IP rate limit (checked BEFORE any parsing or crypto) ─────
         if not self._udp_rate_limiter.allow(ip):
             self._packets_dropped_rate += 1
+            print(f"[DEBUG-LAN] DROP: rate-limited ip={ip} total_dropped={self._packets_dropped_rate}", flush=True)
             # Log sparingly — only on the first drop in each burst to avoid
             # the log flood that defeating this check is meant to prevent.
             if self._packets_dropped_rate % 1000 == 1:
@@ -253,6 +263,7 @@ class UDPStreamService:
             return
 
         if len(data) < 59:
+            print(f"[DEBUG-LAN] DROP: too_short ip={ip} len={len(data)}", flush=True)
             log_event("UDP_MALFORMED_HEARTBEAT", {
                 "ip": ip, "len": len(data), "reason": "too_short",
             })
@@ -270,6 +281,7 @@ class UDPStreamService:
             hmac_tag    = data[offset: offset + 32]
             fp = fp_bytes.decode("utf-8")
         except Exception as exc:
+            print(f"[DEBUG-LAN] DROP: parse_error ip={ip} detail={exc}", flush=True)
             log_event("UDP_MALFORMED_HEARTBEAT", {
                 "ip": ip, "reason": "parse_error", "detail": str(exc),
             })
@@ -278,6 +290,9 @@ class UDPStreamService:
         from .auth_service import auth_service
         if not auth_service.has_session(fp):
             self._packets_rejected_auth += 1
+            print(f"[DEBUG-LAN] DROP: no_session fingerprint={fp[:20]}... ip={ip} "
+                  f"(server has {len(auth_service._sessions)} active session(s): "
+                  f"{[k[:20] for k in auth_service._sessions.keys()]})", flush=True)
             log_event("UDP_UNAUTHENTICATED_HEARTBEAT", {
                 "ip": ip, "fingerprint": fp[:20],
             })
@@ -285,30 +300,35 @@ class UDPStreamService:
 
         session = auth_service._sessions.get(fp)
         if session is None or session.is_expired():
+            print(f"[DEBUG-LAN] DROP: session_none_or_expired fingerprint={fp[:20]}... ip={ip}", flush=True)
             return
 
-        # VULNERABILITY FIX: Prevent heartbeat IP hijacking
-        if ip != session.ip:
-            log_event("UDP_HEARTBEAT_IP_MISMATCH", {
-                "fingerprint": fp[:20],
-                "expected":    session.ip,
-                "actual":      ip,
-            })
-            return
+        # NOTE (LAN FIX): the old pre-HMAC IP check that compared this
+        # heartbeat's source IP against session.ip (the TCP /ws/auth
+        # handshake IP) has been removed from here — see the IP-pinning
+        # block below, which now runs AFTER HMAC verification using
+        # session.udp_ip instead. session.ip itself is left untouched
+        # (still useful for display/audit) and is no longer used for
+        # heartbeat authorization.
 
         session_key = auth_service.get_session_key(fp)
         if session_key is None:
+            print(f"[DEBUG-LAN] DROP: no_session_key fingerprint={fp[:20]}... ip={ip}", flush=True)
             return
 
         try:
             ts_ms = struct.unpack(">Q", ts_bytes)[0]
         except struct.error:
+            print(f"[DEBUG-LAN] DROP: bad_timestamp ip={ip} fp={fp[:20]}...", flush=True)
             log_event("UDP_HEARTBEAT_BAD_TS", {"ip": ip, "fp": fp[:20]})
             return
 
         now_ms = int(time.time() * 1000)
         skew   = abs(now_ms - ts_ms) / 1000.0
         if skew > HB_TIMESTAMP_SKEW:
+            print(f"[DEBUG-LAN] DROP: timestamp_skew ip={ip} fp={fp[:20]}... "
+                  f"skew={round(skew,2)}s max={HB_TIMESTAMP_SKEW}s "
+                  f"(client_ts_ms={ts_ms} server_ts_ms={now_ms})", flush=True)
             log_event("UDP_HEARTBEAT_REPLAY", {
                 "ip": ip, "fp": fp[:20],
                 "skew_seconds": round(skew, 2),
@@ -319,13 +339,47 @@ class UDPStreamService:
         hmac_msg = fp_bytes + ts_bytes + nonce_bytes
         if not hmac_verify(session_key, hmac_msg, hmac_tag):
             self._packets_rejected_auth += 1
+            print(f"[DEBUG-LAN] DROP: hmac_fail fingerprint={fp[:20]}... ip={ip} "
+                  f"(session_key derived at auth time doesn't match what this "
+                  f"heartbeat was signed with — stale/duplicate session, or "
+                  f"client+server disagree on HMAC message layout)", flush=True)
             log_event("UDP_HEARTBEAT_HMAC_FAIL", {
                 "ip": ip, "fingerprint": fp[:20],
             })
             return
 
+        # VULNERABILITY FIX (revised for LAN): pin anti-hijack protection to
+        # the IP of this session's FIRST HMAC-valid UDP heartbeat
+        # (session.udp_ip), not to session.ip (the TCP /ws/auth handshake
+        # IP). On a real two-machine LAN those two can legitimately differ
+        # — multi-homed client (Wi-Fi+Ethernet both up), VPN, or a
+        # Hyper-V/WSL/Docker virtual adapter, all common on Windows — so
+        # the OS may pick a different egress IP for an unconnected UDP
+        # socket than it did for the earlier TCP connection. Since we are
+        # past HMAC verification here, only a holder of the session key
+        # (derived via the X25519 exchange) can reach this point, so
+        # pinning here is still a genuine hijack defense.
+        if session.udp_ip is None:
+            session.udp_ip = ip
+            print(f"[DEBUG-LAN] UDP IP PINNED for session: fingerprint={fp[:20]}... "
+                  f"udp_ip={ip} (ws_auth_ip={session.ip})", flush=True)
+            log_event("UDP_HEARTBEAT_IP_PINNED", {
+                "fingerprint": fp[:20], "udp_ip": ip, "ws_auth_ip": session.ip,
+            })
+        elif ip != session.udp_ip:
+            print(f"[DEBUG-LAN] UDP IP MISMATCH: heartbeat from={ip} but pinned "
+                  f"session.udp_ip={session.udp_ip} — heartbeat REJECTED", flush=True)
+            log_event("UDP_HEARTBEAT_IP_MISMATCH", {
+                "fingerprint": fp[:20],
+                "expected":    session.udp_ip,
+                "actual":      ip,
+            })
+            return
+
         # VULNERABILITY FIX: Nonce replay history persisted in session memory
         if not auth_service.check_and_add_nonce(fp, nonce_bytes):
+            print(f"[DEBUG-LAN] DROP: nonce_replay fingerprint={fp[:20]}... ip={ip} "
+                  f"nonce={nonce_bytes.hex()[:16]}...", flush=True)
             log_event("UDP_HEARTBEAT_NONCE_REPLAY", {
                 "ip": ip, "fingerprint": fp[:20],
             })
@@ -339,6 +393,8 @@ class UDPStreamService:
                 # DoS: cap total concurrent stream clients
                 if len(self._clients) >= MAX_STREAM_CLIENTS:
                     self._clients_rejected_limit += 1
+                    print(f"[DEBUG-LAN] DROP: client_limit_reached fingerprint={fp[:20]}... "
+                          f"ip={ip} current={len(self._clients)} max={MAX_STREAM_CLIENTS}", flush=True)
                     log_event("UDP_CLIENT_LIMIT_REACHED", {
                         "ip": ip, "fingerprint": fp[:20],
                         "current": len(self._clients),
@@ -357,6 +413,8 @@ class UDPStreamService:
                     "device_name":  device_name,
                     "seq":          0,
                 }
+                print(f"[DEBUG-LAN] UDP CLIENT REGISTERED: fingerprint={fp[:20]}... "
+                      f"ip={ip} port={port} device_name={device_name}", flush=True)
                 log_event("CLIENT_CONNECTED_UDP", {
                     "fingerprint": fp, "ip": ip, "port": port,
                 })
@@ -413,6 +471,11 @@ class UDPStreamService:
                         frag_count = max(
                             1, -(-len(ciphertext) // PACKET_MAX_PAYLOAD)  # ceil div
                         )
+                        if not self._debug_lan_first_frame_fragmented:
+                            self._debug_lan_first_frame_fragmented = True
+                            print(f"[DEBUG-LAN] FIRST FRAME FRAGMENTED: fingerprint={fp[:20]}... "
+                                  f"frame_seq={frame_seq} ciphertext_len={len(ciphertext)} "
+                                  f"frag_count={frag_count}", flush=True)
                         if frag_count > MAX_FRAGMENTS:
                             raise ValueError(
                                 f"frame too large to fragment: {len(ciphertext)}B "

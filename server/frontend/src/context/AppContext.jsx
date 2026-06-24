@@ -98,6 +98,8 @@ export function AppProvider({ children }) {
       } else {
         dispatch({ type: 'SET_SERVER_ERROR' });
       }
+      // Re-throw so callers (e.g. AuthGate) can detect failure.
+      throw err;
     }
   }, []);
 

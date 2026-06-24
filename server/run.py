@@ -27,7 +27,7 @@ per-route _localhost_only() checks (which still run too, as defense in
 depth).
 
 Usage:
-    python run.py                   # dashboard: 127.0.0.1:8766, auth: 0.0.0.0:8766
+    python run.py                   # dashboard: 127.0.0.1:8766, auth: 0.0.0.0:8767
     python run.py --port 8000       # explicit dashboard port
     python run.py --auth-port 9000  # auth listener on a different port
     python run.py --reload          # dev mode with auto-reload (dashboard listener only)
@@ -122,7 +122,7 @@ def main() -> None:
     # the LAN split and is the most important invariant in this file —
     # the dashboard/admin surface must never be bound to an externally
     # reachable interface, regardless of what the auth listener does.
-    _ALLOWED_DASHBOARD_HOSTS = {"127.0.0.1", "::1", "localhost"}
+    _ALLOWED_DASHBOARD_HOSTS = {"127.0.0.1", "::1"}
     if args.host not in _ALLOWED_DASHBOARD_HOSTS:
         print(
             f"[run.py] ERROR: --host '{args.host}' is not allowed for the dashboard.\n"

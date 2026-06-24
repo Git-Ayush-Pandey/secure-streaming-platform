@@ -91,8 +91,6 @@ async def _push_dashboard(event: str, data: dict) -> None:
 
 
 def _on_pending(req) -> None:
-    print(f"[DEBUG-LAN] PENDING APPROVAL: device_id={req.device_id} "
-          f"fingerprint={req.fingerprint[:20]}... ip={req.ip}", flush=True)
     asyncio.create_task(_push_dashboard("pending_request", {
         "device_id":   req.device_id,
         "device_name": req.device_name,
@@ -154,19 +152,15 @@ async def lifespan(app: FastAPI):
         width=cap["width"], height=cap["height"],
         fps=cap["fps"],
     )
-    print("[DEBUG-LAN] FRAME CAPTURE TASK STARTING...", flush=True)
     await capture_service.start()
-    print(f"[DEBUG-LAN] FRAME CAPTURE TASK STARTED: running={capture_service.is_running}", flush=True)
     stream_service.capture_started()
 
     # FINDING-06: start() now raises on bind failure
     try:
-        print(f"[DEBUG-LAN] UDP STREAM SENDER STARTING on {UDP_HOST}:{udp_port}...", flush=True)
         await stream_service.start(
             host=UDP_HOST,
             port=udp_port
         )
-        print(f"[DEBUG-LAN] UDP STREAM SENDER STARTED: running={stream_service._running}", flush=True)
     except RuntimeError as exc:
         log_event("UDP_STARTUP_FATAL", {"error": str(exc)})
         # Still allow the app to serve the dashboard even if UDP failed
@@ -613,35 +607,10 @@ async def allow_once_device(fp: str, request: Request) -> dict:
         "action": "allow_once", "fingerprint": fp,
         "actor": actor_id_from_request(request), "result": "ok" if ok else "not_found",
     })
-    if not ok:
-        return {"status": "not_found"}
-    # Build challenge response similar to auth_service's _issue_challenge
-    req = auth_service._pending.get(fp)
-    if not req:
-        return {"status": "ok"}
-    response: dict = {
-        "status": "challenge",
-        "challenge_b64": base64.b64encode(req.challenge).decode(),
-        "session_key_b64": None,
-    }
-    if req.client_x25519_pub_bytes:
-        from cryptography.hazmat.primitives import serialization as _ser
-        srv_pub_bytes = req.x25519_server_priv.public_key().public_bytes(
-            _ser.Encoding.Raw, _ser.PublicFormat.Raw,
-        )
-        response["server_x25519_public_b64"] = base64.b64encode(srv_pub_bytes).decode()
-        if auth_service._server_private:
-            binding_msg = req.challenge + req.client_x25519_pub_bytes + srv_pub_bytes
-            sig = auth_service._server_private.sign(binding_msg)
-            response["server_signature_b64"] = base64.b64encode(sig).decode()
-            response["server_public_key_b64"] = base64.b64encode(
-                auth_service._server_public.public_bytes(
-                    _ser.Encoding.Raw, _ser.PublicFormat.Raw
-                )
-            ).decode()
-            response["server_fingerprint"] = auth_service._server_fp
-    response["udp_port"] = stream_service.udp_port
-    return response
+    # allow_once() calls _push_challenge_to_client() internally, which sends
+    # the challenge directly to the client's open WebSocket. The route returns
+    # a simple status; all challenge construction is in auth_service.
+    return {"status": "ok" if ok else "not_found"}
 
 
 @app.post("/api/devices/pending/{fp}/reject")

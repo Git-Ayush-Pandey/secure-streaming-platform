@@ -1,116 +1,95 @@
 @echo off
 setlocal EnableDelayedExpansion
 
+title Secure Streaming Client
+
+echo.
 echo ========================================
-echo Secure Web Server Backend Startup
+echo Secure Streaming Client Startup
 echo ========================================
 echo.
 
 cd /d "%~dp0"
 
-:: --------------------------------------------------
-:: Verify Python
-:: --------------------------------------------------
+REM --------------------------------------------------
+REM Verify Python
+REM --------------------------------------------------
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python is not installed or not in PATH.
-    pause
-    exit /b 1
+echo [ERROR] Python is not installed or not in PATH.
+pause
+exit /b 1
 )
 
-:: --------------------------------------------------
-:: Create VENV if missing
-:: --------------------------------------------------
+REM --------------------------------------------------
+REM Create VENV if missing
+REM --------------------------------------------------
 if not exist ".venv\Scripts\python.exe" (
-    echo [INFO] Virtual environment not found.
-    echo [INFO] Creating virtual environment...
-    python -m venv .venv
-
-    if errorlevel 1 (
-        echo [ERROR] Failed to create virtual environment.
-        pause
-        exit /b 1
-    )
+echo [INFO] Creating virtual environment...
+python -m venv .venv
 )
 
-:: --------------------------------------------------
-:: Activate VENV
-:: --------------------------------------------------
-echo [INFO] Activating virtual environment...
-call .venv\Scripts\activate.bat
+REM --------------------------------------------------
+REM Repair VENV if broken
+REM --------------------------------------------------
+if not exist ".venv\Scripts\activate.bat" (
+echo.
+echo [WARNING] Broken virtual environment detected.
+echo [INFO] Recreating .venv...
+
+```
+if exist ".venv" (
+    rmdir /s /q ".venv"
+)
+
+python -m venv .venv
 
 if errorlevel 1 (
-    echo [ERROR] Failed to activate virtual environment.
+    echo [ERROR] Failed to recreate virtual environment.
     pause
     exit /b 1
 )
+```
 
-:: --------------------------------------------------
-:: Check if pip is healthy
-:: --------------------------------------------------
-python -m pip --version >nul 2>&1
-
-if errorlevel 1 (
-    echo.
-    echo [WARNING] Corrupted virtual environment detected.
-    echo [INFO] Recreating .venv...
-
-    call deactivate >nul 2>&1
-
-    rmdir /s /q .venv
-
-    python -m venv .venv
-
-    if errorlevel 1 (
-        echo [ERROR] Failed to recreate virtual environment.
-        pause
-        exit /b 1
-    )
-
-    call .venv\Scripts\activate.bat
-
-    python -m ensurepip --upgrade
-
-    if errorlevel 1 (
-        echo [ERROR] Failed to repair pip.
-        pause
-        exit /b 1
-    )
 )
 
-:: --------------------------------------------------
-:: Upgrade pip
-:: --------------------------------------------------
+REM --------------------------------------------------
+REM Activate VENV
+REM --------------------------------------------------
+call ".venv\Scripts\activate.bat"
+
+if errorlevel 1 (
+echo [ERROR] Failed to activate virtual environment.
+pause
+exit /b 1
+)
+
+REM --------------------------------------------------
+REM Upgrade pip
+REM --------------------------------------------------
 echo.
 echo [INFO] Upgrading pip...
 python -m pip install --upgrade pip
 
+REM --------------------------------------------------
+REM Install dependencies
+REM --------------------------------------------------
+if exist "requirements.txt" (
+echo.
+echo [INFO] Installing dependencies...
+python -m pip install -r requirements.txt
+
 if errorlevel 1 (
-    echo [ERROR] Failed to upgrade pip.
+    echo [ERROR] Failed to install requirements.
     pause
     exit /b 1
 )
 
-:: --------------------------------------------------
-:: Install requirements
-:: --------------------------------------------------
-if exist requirements.txt (
-    echo.
-    echo [INFO] Installing dependencies...
-    python -m pip install -r requirements.txt
-
-    if errorlevel 1 (
-        echo [ERROR] Failed to install requirements.
-        pause
-        exit /b 1
-    )
-) else (
-    echo [WARNING] requirements.txt not found.
 )
 
-:: --------------------------------------------------
-:: Start application
-:: --------------------------------------------------
+REM --------------------------------------------------
+REM Start Client
+REM --------------------------------------------------
 echo.
 echo ========================================
 echo Starting Application

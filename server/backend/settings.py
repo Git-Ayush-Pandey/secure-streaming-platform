@@ -84,7 +84,7 @@ HEARTBEAT_TIMESTAMP_SKEW = int(
 )
 
 NONCE_HISTORY_LEN = int(
-    os.getenv("NONCE_HISTORY_LEN", "64")
+    os.getenv("NONCE_HISTORY_LEN", "512")
 )
 
 UDP_RATE_LIMIT_PACKETS = int(
